@@ -88,6 +88,7 @@ class AmazonS3Vectors(VectorStore):
         *,
         vector_bucket_name: str,
         index_name: str,
+        index_arn: str,
         data_type: Literal["float32"] = "float32",
         distance_metric: Literal["euclidean", "cosine"] = "cosine",
         non_filterable_metadata_keys: list[str] | None = None,
@@ -165,6 +166,7 @@ class AmazonS3Vectors(VectorStore):
         """
         self.vector_bucket_name = vector_bucket_name
         self.index_name = index_name
+        self.index_arn = index_arn
         self.data_type = data_type
         self.distance_metric = distance_metric
         self.non_filterable_metadata_keys = non_filterable_metadata_keys
@@ -270,11 +272,17 @@ class AmazonS3Vectors(VectorStore):
                         "metadata": metadata,
                     }
                 )
-            self.client.put_vectors(
-                vectorBucketName=self.vector_bucket_name,
-                indexName=self.index_name,
-                vectors=vectors,
-            )
+            if self.index_arn is not None:
+                self.client.put_vectors(
+                    indexArn=self.index_arn,
+                    vectors=vectors,
+                )
+            else:
+                self.client.put_vectors(
+                    vectorBucketName=self.vector_bucket_name,
+                    indexName=self.index_name,
+                    vectors=vectors,
+                )
         return result_ids
 
     def delete(
@@ -299,11 +307,17 @@ class AmazonS3Vectors(VectorStore):
             )
         else:
             for i in range(0, len(ids), batch_size):
-                self.client.delete_vectors(
-                    vectorBucketName=self.vector_bucket_name,
-                    indexName=self.index_name,
-                    keys=ids[i : i + batch_size],
-                )
+                if self.index_arn is not None:
+                    self.client.delete_vectors(
+                        indexArn=self.index_arn,
+                        keys=ids[i: i + batch_size],
+                    )
+                else:
+                    self.client.delete_vectors(
+                        vectorBucketName=self.vector_bucket_name,
+                        indexName=self.index_name,
+                        keys=ids[i : i + batch_size],
+                    )
         return True
 
     def get_by_ids(
@@ -324,13 +338,21 @@ class AmazonS3Vectors(VectorStore):
         for i in range(0, len(ids), batch_size):
             # get_vectors does not maintain order and ignores duplicates
             # and non-existent keys.
-            response = self.client.get_vectors(
-                vectorBucketName=self.vector_bucket_name,
-                indexName=self.index_name,
-                keys=ids[i : i + batch_size],
-                returnData=False,
-                returnMetadata=True,
-            )
+            if self.index_arn is not None:
+                response = self.client.get_vectors(
+                    indexArn=self.index_arn,
+                    keys=ids[i : i + batch_size],
+                    returnData=False,
+                    returnMetadata=True,
+                )
+            else:
+                response = self.client.get_vectors(
+                    vectorBucketName=self.vector_bucket_name,
+                    indexName=self.index_name,
+                    keys=ids[i : i + batch_size],
+                    returnData=False,
+                    returnMetadata=True,
+                )
             vector_map = {vector["key"]: vector for vector in response["vectors"]}
             for id_ in ids[i : i + batch_size]:
                 if id_ not in vector_map:
@@ -405,15 +427,25 @@ class AmazonS3Vectors(VectorStore):
         if self.embeddings is None:
             raise ValueError("Embeddings object is required for similarity search")
         embedding = self.embeddings.embed_query(query)
-        response = self.client.query_vectors(
-            vectorBucketName=self.vector_bucket_name,
-            indexName=self.index_name,
-            topK=k,
-            queryVector={self.data_type: embedding},
-            filter=filter,
-            returnMetadata=True,
-            returnDistance=True,
-        )
+        if self.index_arn is not None:
+            response = self.client.query_vectors(
+                indexArn=self.index_arn,
+                topK=k,
+                queryVector={self.data_type: embedding},
+                filter=filter,
+                returnMetadata=True,
+                returnDistance=True,
+            )
+        else:
+            response = self.client.query_vectors(
+                vectorBucketName=self.vector_bucket_name,
+                indexName=self.index_name,
+                topK=k,
+                queryVector={self.data_type: embedding},
+                filter=filter,
+                returnMetadata=True,
+                returnDistance=True,
+            )
         docs = [self._create_document(vector) for vector in response["vectors"]]
         distances = [vector["distance"] for vector in response["vectors"]]
         return list(zip(docs, distances))
@@ -439,15 +471,25 @@ class AmazonS3Vectors(VectorStore):
             List of `Document` objects most similar to the query vector.
 
         """
-        response = self.client.query_vectors(
-            vectorBucketName=self.vector_bucket_name,
-            indexName=self.index_name,
-            topK=k,
-            queryVector={self.data_type: embedding},
-            filter=filter,
-            returnMetadata=True,
-            returnDistance=False,
-        )
+        if self.index_arn is not None:
+            response = self.client.query_vectors(
+                indexArn=self.index_arn,
+                topK=k,
+                queryVector={self.data_type: embedding},
+                filter=filter,
+                returnMetadata=True,
+                returnDistance=False,
+            )
+        else:
+            response = self.client.query_vectors(
+                vectorBucketName=self.vector_bucket_name,
+                indexName=self.index_name,
+                topK=k,
+                queryVector={self.data_type: embedding},
+                filter=filter,
+                returnMetadata=True,
+                returnDistance=False,
+            )
         return [self._create_document(vector) for vector in response["vectors"]]
 
     def as_retriever(self, **kwargs: Any) -> AmazonS3VectorsRetriever:
@@ -574,10 +616,14 @@ class AmazonS3Vectors(VectorStore):
 
     def _get_index(self) -> dict | None:
         try:
-            return self.client.get_index(
-                vectorBucketName=self.vector_bucket_name,
-                indexName=self.index_name,
-            )
+            if self.index_arn is not None:
+                return self.client.get_index(
+                    indexArn=self.index_arn)
+            else:
+                return self.client.get_index(
+                    vectorBucketName=self.vector_bucket_name,
+                    indexName=self.index_name,
+                )
         except ClientError as e:
             if e.response["Error"]["Code"] == "NotFoundException":
                 return None
